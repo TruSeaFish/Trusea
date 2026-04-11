@@ -636,44 +636,54 @@ function buildSummaryHtml(o) {
 
   // ── PATH 1: Build from raw G/H/J columns (most accurate) ──
   if (o.rawProduct && o.rawProduct.trim()) {
-    const products = o.rawProduct.split('|').map(p => p.trim()).filter(Boolean);
-    const addons   = o.rawAddons  ? o.rawAddons.split('|').map(a => a.trim()) : [];
-    const prices   = o.rawPrice   ? o.rawPrice.split('|').map(p => p.trim())  : [];
+    const products   = o.rawProduct.split('|').map(p => p.trim()).filter(Boolean);
+    const addons     = o.rawAddons ? o.rawAddons.split('|').map(a => a.trim()) : [];
+    const prices     = o.rawPrice  ? o.rawPrice.split('|').map(p => p.trim())  : [];
     const grandTotal = parseFloat(String(o.orderTotal).replace(/[^0-9.]/g,'')) || 0;
 
     const items = products.map((product, idx) => {
       const priceSegRaw = prices[idx] || '';
       const addonText   = addons[idx] || '';
 
-      // Parse price: "₹1380+₹199" → unitPrice=1380, addonAmt=199
-      const priceParts = priceSegRaw.split('+').map(p => {
-        const n = parseFloat(p.replace(/[^0-9.]/g, ''));
-        return isNaN(n) ? 0 : n;
-      });
-      const unitPrice = priceParts[0] || 0;
-      const addonAmt  = priceParts.slice(1).reduce((a, b) => a + b, 0);
+      // NEW FORMAT: "₹1380×2+₹199"  →  unitPrice=1380, qty=2, addonAmt=199
+      // OLD FORMAT: "₹1380+₹199"     →  unitPrice=1380, qty=?, addonAmt=199
+      let unitPrice = 0, qty = 1, addonAmt = 0;
 
-      // Also parse addon amounts from addon text "+₹199" as fallback
-      let addonAmtFromText = 0;
-      if (addonText) {
-        const matches = addonText.match(/\+₹([\d,]+)/g) || [];
-        addonAmtFromText = matches.reduce((sum, m) => sum + parseFloat(m.replace(/[^0-9]/g,'')), 0);
+      // Try new format first: ₹price×qty
+      const newFmt = priceSegRaw.match(/₹?([\d,]+)\s*[×x]\s*(\d+)/);
+      if (newFmt) {
+        unitPrice = parseFloat(newFmt[1].replace(/,/g,'')) || 0;
+        qty       = parseInt(newFmt[2]) || 1;
+        // Extract addon after the qty part
+        const afterQty = priceSegRaw.replace(/₹?[\d,]+\s*[×x]\s*\d+/, '');
+        const addonMatches = afterQty.match(/\+₹([\d,]+)/g) || [];
+        addonAmt = addonMatches.reduce((s, m) => s + parseFloat(m.replace(/[^0-9]/g,'')), 0);
+      } else {
+        // Old format: "₹1380+₹199" — split by +
+        const priceParts = priceSegRaw.split('+').map(p => {
+          const n = parseFloat(p.replace(/[^0-9.]/g,''));
+          return isNaN(n) ? 0 : n;
+        });
+        unitPrice = priceParts[0] || 0;
+        addonAmt  = priceParts.slice(1).reduce((a, b) => a + b, 0);
+
+        // Also parse addon amounts from addon text as fallback
+        if (!addonAmt && addonText) {
+          const matches = addonText.match(/\+₹([\d,]+)/g) || [];
+          addonAmt = matches.reduce((s, m) => s + parseFloat(m.replace(/[^0-9]/g,'')), 0);
+        }
+
+        // Single product old format: derive qty from total
+        if (products.length === 1 && unitPrice > 0 && grandTotal > 0) {
+          const calc = Math.round((grandTotal - addonAmt) / unitPrice);
+          if (calc > 0) qty = calc;
+        }
       }
-      const finalAddonAmt = addonAmt || addonAmtFromText;
 
-      // Qty calculation:
-      // Single product → qty = (total - addonAmt) / unitPrice
-      // Multiple products → qty = 1 (can't split without per-item subtotals)
-      let qty = 1;
-      if (products.length === 1 && unitPrice > 0 && grandTotal > 0) {
-        const calc = Math.round((grandTotal - finalAddonAmt) / unitPrice);
-        if (calc > 0) qty = calc;
-      }
+      const lineAmt  = unitPrice * qty;
+      const subtotal = lineAmt + addonAmt;
 
-      const lineAmt = unitPrice * qty;
-      const subtotal = lineAmt + finalAddonAmt;
-
-      return { name: product, qty, unitPrice, addonText, addonAmt: finalAddonAmt, lineAmt, subtotal };
+      return { name: product, qty, unitPrice, addonText, addonAmt, lineAmt, subtotal };
     });
 
     const itemsHtml = items.map(item => `
