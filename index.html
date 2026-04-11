@@ -387,48 +387,101 @@ body {
 .p-online      { background: #dbeafe; color: #1e40af; }
 .p-prebook     { background: #f0fdf4; color: #15803d; }
 
-/* ── PRODUCT LINE ITEMS ── */
-.product-line {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.product-item {
+/* ── WHATSAPP-STYLE PRODUCT LIST ── */
+.wa-product-list { display: flex; flex-direction: column; gap: 0; }
+
+.wa-product-item {
+  padding: 8px 0;
   border-bottom: 1px solid #eef2f7;
-  padding-bottom: 8px;
 }
-.product-item:last-child { border-bottom: none; padding-bottom: 0; }
-.product-name {
+.wa-product-item:last-child { border-bottom: none; padding-bottom: 0; }
+.wa-product-item:first-child { padding-top: 0; }
+
+.wa-product-name {
   font-size: 13px;
+  font-weight: 600;
   color: var(--text);
-  font-weight: 500;
   line-height: 1.4;
-  margin-bottom: 4px;
+  margin-bottom: 5px;
 }
-.product-meta {
+
+/* Qty row */
+.wa-product-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 6px;
+  margin-bottom: 3px;
   flex-wrap: wrap;
 }
-.product-qty {
-  font-size: 12px;
-  font-weight: 600;
+.wa-qty {
+  font-size: 11px;
+  font-weight: 700;
   color: var(--ocean);
   background: #e8f4fd;
   border-radius: 6px;
-  padding: 2px 8px;
+  padding: 2px 7px;
+  flex-shrink: 0;
 }
-.product-price {
-  font-size: 12px;
+.wa-unit-price {
+  font-size: 11px;
   color: var(--muted);
+  flex: 1;
 }
-.product-subtotal {
+.wa-line-total {
   font-size: 12px;
   font-weight: 700;
   color: var(--text);
-  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* Addon row */
+.wa-addon-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  background: #fffbeb;
+  border-radius: 6px;
+  padding: 4px 8px;
+  margin-bottom: 3px;
+  flex-wrap: wrap;
+}
+.wa-addon-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: #92400e;
+  flex-shrink: 0;
+  padding-top: 1px;
+}
+.wa-addon-text {
+  font-size: 11px;
+  color: #78350f;
+  flex: 1;
+  line-height: 1.4;
+}
+.wa-addon-amt {
+  font-size: 11px;
+  font-weight: 700;
+  color: #92400e;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Sub-total row */
+.wa-subtotal-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 3px;
+}
+.wa-subtotal-lbl {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.wa-subtotal-val {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text);
 }
 .empty { text-align: center; padding: 48px 24px; color: var(--muted); }
 .empty-icon { font-size: 44px; margin-bottom: 10px; }
@@ -479,17 +532,7 @@ body {
       <p>Daily Orders</p>
     </div>
 
-    <!-- Center: Logo -->
-    <div class="logo-center">
-      <div class="logo-box" onclick="document.getElementById('logoUpload').click()" title="Tap to upload logo">
-        <img id="logoImg" src="" alt="" style="display:none">
-        <span class="logo-placeholder" id="logoPlaceholder">🐠</span>
-      </div>
-      <div class="logo-hint">tap to add logo</div>
-      <input type="file" id="logoUpload" class="logo-upload" accept="image/*" onchange="uploadLogo(this)">
-    </div>
-
-    <!-- Right: Actions -->
+       <!-- Right: Actions -->
     <div class="header-actions">
       <button class="icon-btn" id="bellBtn">🔔</button>
       <button class="icon-btn" onclick="manualSync()">⟳</button>
@@ -669,7 +712,7 @@ function fetchSheet() {
 
         const rows = data.table.rows.map((r, i) => ({
           _row:       i,
-          orderId:    v(r, idx.oid)  || ('#' + String(i+1).padStart(3,'0')),
+          orderId:    v(r, idx.oid) || ('TSF-' + String(i+1).padStart(3,'0')),
           name:       v(r, idx.name),
           phone:      v(r, idx.phone),
           address:    v(r, idx.addr),
@@ -858,72 +901,86 @@ function render() {
     const cardCls = o.confirm === STATUS.confirmed ? 'confirmed' :
                     o.confirm === STATUS.pending    ? 'pending'   : 'unconfirmed';
 
-    // ── Parse price column ────────────────────────────────
-    // Price column per product pipe-separated: "₹760+₹389 | ₹618 | ₹374"
-    // Each item can have "productPrice+addonPrice" with + sign
+    // ── Parse: Products, Prices, Addons — all pipe-separated per item ──────
+    //
+    // Product:  "Item A | Item B | Item C | Item D"
+    // Price:    "₹1380+₹199 | ₹356+₹199+₹71 | ₹922 | ₹902+₹199"
+    //            └─ prodPrice+addon1+addon2...  per product
+    // Add-ons:  "Head & Tail +₹199 | Head & Tail +₹199, 1 extra piece(s) +₹71 | | Head & Tail +₹199"
+    //            └─ per product addon text (empty string if no addon for that product)
+    //
+    // Qty per product is back-calculated:
+    //   qty = (lineTotal) / prodUnitPrice
+    //   lineTotal = subtotal - addonTotal for that product
+    //   subtotal derived from order total split (we use price column for unit prices)
 
-    // Parse a price string like "₹760+₹389" → { prodPrice: 760, addonPrice: 389 }
-    function parsePriceParts(rawPrice) {
-      const parts = (rawPrice || '').split('+').map(p => {
-        const n = parseFloat(p.replace(/[^0-9.]/g, ''));
-        return isNaN(n) ? 0 : n;
-      });
-      return { prodPrice: parts[0] || 0, addonPrice: parts.slice(1).reduce((a,b)=>a+b,0) };
-    }
+    const products    = o.product ? o.product.split('|').map(p => p.trim()).filter(Boolean) : [];
+    const addonTexts  = o.addons  ? o.addons.split('|').map(p => p.trim())                  : [];
+    const grandTotal  = parseFloat(String(o.orderTotal).replace(/[^0-9.]/g,'')) || 0;
 
-    // All per-product price segments (pipe-separated)
-    const priceSegments = o.price
-      ? o.price.split('|').map(p => parsePriceParts(p.trim()))
+    // Parse price per product: "₹1380+₹199" → { unitPrice:1380, addonTotal:199 }
+    const priceSegs = o.price
+      ? o.price.split('|').map(seg => {
+          const parts = seg.trim().split('+').map(p => {
+            const n = parseFloat(p.replace(/[^0-9.]/g,''));
+            return isNaN(n) ? 0 : n;
+          });
+          return { unitPrice: parts[0]||0, addonAmt: parts.slice(1).reduce((a,b)=>a+b,0) };
+        })
       : [];
 
-    // Products list
-    const products = o.product
-      ? o.product.split('|').map(p => p.trim()).filter(Boolean)
-      : [];
-
-    // Compute product-only total and addon-only total
-    let productTotal = 0;
-    let addonTotal   = 0;
-    priceSegments.forEach(seg => {
-      productTotal += seg.prodPrice;
-      addonTotal   += seg.addonPrice;
-    });
-
-    // If only 1 product and order total > productTotal, customer ordered qty > 1
-    const grandTotal = parseFloat(String(o.orderTotal).replace(/[^0-9.]/g,'')) || 0;
-
-    // Build product lines HTML
-    const prodLinesHtml = products.map((name, i) => {
-      const seg = priceSegments[i] || { prodPrice: 0, addonPrice: 0 };
-      const unitPrice = seg.prodPrice;
-
-      // Qty detection: only possible for single-product orders
-      let qty = 1;
-      if (products.length === 1 && unitPrice > 0 && grandTotal > 0) {
-        qty = Math.round((grandTotal - addonTotal) / unitPrice) || 1;
+    // Calculate qty per product
+    // Strategy: for each product, qty = round(lineSubtotal / unitPrice)
+    // lineSubtotal is unknown individually BUT:
+    //   total = sum of (qty[i] * unitPrice[i] + addonAmt[i])
+    // We assume qty=1 unless single product order
+    const inferQty = (i) => {
+      const seg = priceSegs[i] || { unitPrice:0, addonAmt:0 };
+      if (!seg.unitPrice) return 1;
+      if (products.length === 1) {
+        // Single product: qty = (grandTotal - addonAmt) / unitPrice
+        const qty = Math.round((grandTotal - seg.addonAmt) / seg.unitPrice);
+        return qty > 0 ? qty : 1;
       }
-      const lineTotal = unitPrice * qty;
+      return 1; // multi-product: can't infer per-item qty from total alone
+    };
+
+    // Build WhatsApp-style product lines — each product with its own addon below
+    const whatsappLines = products.map((name, i) => {
+      const seg      = priceSegs[i]   || { unitPrice:0, addonAmt:0 };
+      const addon    = addonTexts[i]  || '';
+      const qty      = inferQty(i);
+      const lineBase = seg.unitPrice * qty;
+      const lineSub  = lineBase + seg.addonAmt;
 
       return `
-        <div class="product-item">
-          <div class="product-name">${name}</div>
-          ${unitPrice > 0 ? `
-          <div class="product-meta">
-            <span class="product-qty">Qty × ${qty}</span>
-            <span class="product-price">₹${unitPrice.toLocaleString('en-IN')} / unit</span>
-            <span class="product-subtotal">₹${lineTotal.toLocaleString('en-IN')}</span>
+        <div class="wa-product-item">
+          <div class="wa-product-name">${name}</div>
+          ${seg.unitPrice > 0 ? `
+          <div class="wa-product-row">
+            <span class="wa-qty">Qty × ${qty}</span>
+            <span class="wa-unit-price">₹${seg.unitPrice.toLocaleString('en-IN')} / unit</span>
+            <span class="wa-line-total">₹${lineBase.toLocaleString('en-IN')}</span>
+          </div>` : ''}
+          ${addon ? `
+          <div class="wa-addon-row">
+            <span class="wa-addon-label">➕ Add-ons</span>
+            <span class="wa-addon-text">${addon}</span>
+            ${seg.addonAmt > 0 ? `<span class="wa-addon-amt">+₹${seg.addonAmt.toLocaleString('en-IN')}</span>` : ''}
+          </div>` : ''}
+          ${seg.unitPrice > 0 && (qty > 1 || seg.addonAmt > 0) ? `
+          <div class="wa-subtotal-row">
+            <span class="wa-subtotal-lbl">Sub-total</span>
+            <span class="wa-subtotal-val">₹${lineSub.toLocaleString('en-IN')}</span>
           </div>` : ''}
         </div>`;
     }).join('');
 
-    // Addon section — show raw text + addon total on right
-    const addonText = o.addons ? o.addons.trim() : '';
-
     // Pre-book lines (no price)
-    const prebookLinesHtml = o.prebook
-      ? o.prebook.split('|').map(p => p.trim()).filter(Boolean).map(name =>
-          `<div class="product-item"><div class="product-name">${name}</div></div>`
-        ).join('')
+    const prebookLines = o.prebook
+      ? o.prebook.split('|').map(p => p.trim()).filter(Boolean)
+          .map(name => `<div class="wa-product-item"><div class="wa-product-name">${name}</div></div>`)
+          .join('')
       : '';
 
     return `
@@ -941,25 +998,16 @@ function render() {
 
       <div class="card-body">
 
-        ${prodLinesHtml ? `
+        ${whatsappLines ? `
         <div class="items-box">
           <div class="items-label">🐟 Products</div>
-          <div class="product-line">${prodLinesHtml}</div>
+          <div class="wa-product-list">${whatsappLines}</div>
         </div>` : ''}
 
-        ${addonText ? `
-        <div class="addon-box">
-          <div style="display:flex;justify-content:space-between;align-items:center">
-            <div class="addon-label">➕ Add-ons</div>
-            ${addonTotal > 0 ? `<span style="font-size:13px;font-weight:700;color:#92400e">₹${addonTotal.toLocaleString('en-IN')}</span>` : ''}
-          </div>
-          <div class="items-text" style="margin-top:4px">${addonText}</div>
-        </div>` : ''}
-
-        ${prebookLinesHtml ? `
+        ${prebookLines ? `
         <div class="prebook-box">
           <div class="prebook-label">📅 Pre-Book</div>
-          <div class="product-line">${prebookLinesHtml}</div>
+          <div class="wa-product-list">${prebookLines}</div>
         </div>` : ''}
 
         ${o.address ? `
