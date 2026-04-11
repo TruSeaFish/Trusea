@@ -429,8 +429,11 @@ const COL = {
   address:      'Address',
   mapLink:      'Map Link',
   prebook:      'Pre-Book',
+  product:      'Product',      // Column G - raw pipe-separated products
+  addons:       'Add-ons',      // Column H - raw pipe-separated addons
+  price:        'Price',        // Column J - raw pipe-separated prices
   orderTotal:   'Order Total',
-  orderSummary: 'Order Summary',  // Column L
+  orderSummary: 'Order Summary', // Column L - pre-built summary (optional)
   confirm:      'Order Confirmation',
   processing:   'Processing',
   dispatch:     'Dispatch',
@@ -511,6 +514,9 @@ function fetchSheet() {
           addr:    fi(COL.address),
           map:     fi(COL.mapLink),
           pre:     fi(COL.prebook),
+          prod:    fi(COL.product),
+          addons:  fi(COL.addons),
+          price:   fi(COL.price),
           total:   fi(COL.orderTotal),
           summary: fi(COL.orderSummary),
           conf:    fi(COL.confirm),
@@ -554,6 +560,9 @@ function fetchSheet() {
           address:      v(r, I.addr),
           mapLink:      v(r, I.map),
           prebook:      v(r, I.pre),
+          rawProduct:   v(r, I.prod),
+          rawAddons:    v(r, I.addons),
+          rawPrice:     v(r, I.price),
           orderTotal:   fv(r, I.total) || v(r, I.total),
           orderSummary: v(r, I.summary),
           timestamp:    tsStr(r, I.ts),
@@ -622,55 +631,117 @@ function parseOrderSummary(text) {
 }
 
 // ── BUILD ORDER SUMMARY HTML ──────────────────
+// Priority: rawProduct+rawAddons+rawPrice columns → parsed orderSummary → raw text
 function buildSummaryHtml(o) {
-  const parsed = parseOrderSummary(o.orderSummary);
 
-  if (!parsed || !parsed.items.length) {
-    // Fallback: just show raw text
-    return o.orderSummary
-      ? `<div class="summary-box"><div class="summary-lbl">🐟 Order Details</div><div style="padding:8px 10px;font-size:13px;color:var(--text);line-height:1.6;white-space:pre-wrap">${o.orderSummary}</div></div>`
-      : '';
-  }
+  // ── PATH 1: Build from raw G/H/J columns (most accurate) ──
+  if (o.rawProduct && o.rawProduct.trim()) {
+    const products = o.rawProduct.split('|').map(p => p.trim()).filter(Boolean);
+    const addons   = o.rawAddons  ? o.rawAddons.split('|').map(a => a.trim()) : [];
+    const prices   = o.rawPrice   ? o.rawPrice.split('|').map(p => p.trim())  : [];
+    const grandTotal = parseFloat(String(o.orderTotal).replace(/[^0-9.]/g,'')) || 0;
 
-  const itemsHtml = parsed.items.map(item => {
-    // Calculate addon amount from addon text
-    let addonAmt = 0;
-    if (item.addons) {
-      const matches = item.addons.match(/\+₹([\d,]+)/g) || [];
-      addonAmt = matches.reduce((sum, m) => sum + parseInt(m.replace(/[^0-9]/g,'')), 0);
-    }
+    const items = products.map((product, idx) => {
+      const priceSegRaw = prices[idx] || '';
+      const addonText   = addons[idx] || '';
 
-    const lineAmt  = (item.unitPrice || 0) * (item.qty || 1);
-    const subtotal = item.subtotal || (lineAmt + addonAmt);
+      // Parse price: "₹1380+₹199" → unitPrice=1380, addonAmt=199
+      const priceParts = priceSegRaw.split('+').map(p => {
+        const n = parseFloat(p.replace(/[^0-9.]/g, ''));
+        return isNaN(n) ? 0 : n;
+      });
+      const unitPrice = priceParts[0] || 0;
+      const addonAmt  = priceParts.slice(1).reduce((a, b) => a + b, 0);
 
-    return `
+      // Also parse addon amounts from addon text "+₹199" as fallback
+      let addonAmtFromText = 0;
+      if (addonText) {
+        const matches = addonText.match(/\+₹([\d,]+)/g) || [];
+        addonAmtFromText = matches.reduce((sum, m) => sum + parseFloat(m.replace(/[^0-9]/g,'')), 0);
+      }
+      const finalAddonAmt = addonAmt || addonAmtFromText;
+
+      // Qty calculation:
+      // Single product → qty = (total - addonAmt) / unitPrice
+      // Multiple products → qty = 1 (can't split without per-item subtotals)
+      let qty = 1;
+      if (products.length === 1 && unitPrice > 0 && grandTotal > 0) {
+        const calc = Math.round((grandTotal - finalAddonAmt) / unitPrice);
+        if (calc > 0) qty = calc;
+      }
+
+      const lineAmt = unitPrice * qty;
+      const subtotal = lineAmt + finalAddonAmt;
+
+      return { name: product, qty, unitPrice, addonText, addonAmt: finalAddonAmt, lineAmt, subtotal };
+    });
+
+    const itemsHtml = items.map(item => `
       <div class="prod-item">
         <div class="prod-name">${item.name}</div>
         ${item.unitPrice ? `
         <div class="qty-row">
-          <span class="qty-badge">Qty × ${item.qty || 1}</span>
-          <span class="unit-price">₹${(item.unitPrice).toLocaleString('en-IN')} / unit</span>
-          <span class="line-amt">₹${lineAmt.toLocaleString('en-IN')}</span>
+          <span class="qty-badge">Qty × ${item.qty}</span>
+          <span class="unit-price">₹${item.unitPrice.toLocaleString('en-IN')} / unit</span>
+          <span class="line-amt">₹${item.lineAmt.toLocaleString('en-IN')}</span>
         </div>` : ''}
-        ${item.addons ? `
+        ${item.addonText ? `
         <div class="addon-row">
           <span class="addon-tag">➕ Add-ons</span>
-          <span class="addon-desc">${item.addons}</span>
-          ${addonAmt > 0 ? `<span class="addon-amt">+₹${addonAmt.toLocaleString('en-IN')}</span>` : ''}
+          <span class="addon-desc">${item.addonText}</span>
+          ${item.addonAmt > 0 ? `<span class="addon-amt">+₹${item.addonAmt.toLocaleString('en-IN')}</span>` : ''}
         </div>` : ''}
-        ${subtotal && (item.addons || (item.qty||1) > 1) ? `
+        ${(item.addonAmt > 0 || item.qty > 1) ? `
         <div class="sub-row">
           <span class="sub-lbl">Sub-total</span>
-          <span class="sub-val">₹${subtotal.toLocaleString('en-IN')}</span>
+          <span class="sub-val">₹${item.subtotal.toLocaleString('en-IN')}</span>
         </div>` : ''}
-      </div>`;
-  }).join('');
+      </div>`).join('');
 
-  return `
-    <div class="summary-box">
-      <div class="summary-lbl">🐟 Products</div>
-      ${itemsHtml}
-    </div>`;
+    return `<div class="summary-box"><div class="summary-lbl">🐟 Products</div>${itemsHtml}</div>`;
+  }
+
+  // ── PATH 2: Fall back to parsing Order Summary column text ──
+  const parsed = parseOrderSummary(o.orderSummary);
+
+  if (parsed && parsed.items.length) {
+    const itemsHtml = parsed.items.map(item => {
+      let addonAmt = 0;
+      if (item.addons) {
+        const matches = item.addons.match(/\+₹([\d,]+)/g) || [];
+        addonAmt = matches.reduce((sum, m) => sum + parseInt(m.replace(/[^0-9]/g,'')), 0);
+      }
+      const lineAmt  = (item.unitPrice || 0) * (item.qty || 1);
+      const subtotal = item.subtotal || (lineAmt + addonAmt);
+      return `
+        <div class="prod-item">
+          <div class="prod-name">${item.name}</div>
+          ${item.unitPrice ? `
+          <div class="qty-row">
+            <span class="qty-badge">Qty × ${item.qty || 1}</span>
+            <span class="unit-price">₹${item.unitPrice.toLocaleString('en-IN')} / unit</span>
+            <span class="line-amt">₹${lineAmt.toLocaleString('en-IN')}</span>
+          </div>` : ''}
+          ${item.addons ? `
+          <div class="addon-row">
+            <span class="addon-tag">➕ Add-ons</span>
+            <span class="addon-desc">${item.addons}</span>
+            ${addonAmt > 0 ? `<span class="addon-amt">+₹${addonAmt.toLocaleString('en-IN')}</span>` : ''}
+          </div>` : ''}
+          ${subtotal && (item.addons || (item.qty||1) > 1) ? `
+          <div class="sub-row">
+            <span class="sub-lbl">Sub-total</span>
+            <span class="sub-val">₹${subtotal.toLocaleString('en-IN')}</span>
+          </div>` : ''}
+        </div>`;
+    }).join('');
+    return `<div class="summary-box"><div class="summary-lbl">🐟 Products</div>${itemsHtml}</div>`;
+  }
+
+  // ── PATH 3: Raw text fallback ──
+  return o.orderSummary
+    ? `<div class="summary-box"><div class="summary-lbl">🐟 Order Details</div><div style="padding:8px 10px;font-size:13px;color:var(--text);line-height:1.6;white-space:pre-wrap">${o.orderSummary}</div></div>`
+    : '';
 }
 
 // ── ALERTS ────────────────────────────────────
@@ -897,14 +968,20 @@ const DEMO = [{
   orderId:'TSF-001', name:'Arun Kumar', phone:'9840112345',
   address:'42 Anna Nagar, Chennai', mapLink:'', timestamp:'12 Apr 2026, 09:30 AM',
   prebook:'', orderTotal:'1149',
-  orderSummary:`Order Summary:\n* Croacker - Panna (பண்ணா) – Whole (1040-1160g / Net 760-860g)\n  Qty: 1 × ₹760\n  Add-ons: Head & Tail +₹199, 2 extra piece(s) +₹190\n  Sub-total: ₹1,149\nOrder Total: ₹1,149`,
+  rawProduct: 'Croacker - Panna (பண்ணா) – Whole (1040-1160g / Net 760-860g)',
+  rawAddons:  'Head & Tail +₹199, 2 extra piece(s) +₹190',
+  rawPrice:   '₹760+₹199+₹190',
+  orderSummary:'',
   confirm:'Confirmed', processing:'Done', dispatch:'Dispatched',
   delivery:'Out for Delivery', payMethod:'COD', payment:'Pending',
 },{
   orderId:'TSF-002', name:'Divya Menon', phone:'9444023456',
   address:'15 Besant Nagar, Chennai', mapLink:'', timestamp:'12 Apr 2026, 10:15 AM',
   prebook:'Tuna - 2kg (next week)', orderTotal:'7173',
-  orderSummary:`Order Summary:\n* Seer - Vanjaram (வஞ்சரம்) – Small Slices (1150-1300g / Net 930-1050g)\n  Qty: 1 × ₹1380\n  Add-ons: Head & Tail +₹199\n  Sub-total: ₹1,579\n* Baracuda - Seela (சீலா) – Large Slices (520-650g / Net 360-450g)\n  Qty: 1 × ₹356\n  Add-ons: Head & Tail +₹199, 1 extra piece(s) +₹71\n  Sub-total: ₹626\n* Trevally - Thegai Paarai (தேங்காய் பாறை) – Large Slices (1080-1200g / Net 760-1060g)\n  Qty: 3 × ₹922\n  Sub-total: ₹2,766\n* Spot Grouper - Kalava (கலவா) – Medium Slices (1040-1160g / Net 760-860g)\n  Qty: 2 × ₹902\n  Add-ons: Head & Tail +₹199\n  Sub-total: ₹2,202\nOrder Total: ₹7,173`,
+  rawProduct: 'Seer - Vanjaram (வஞ்சரம்) – Small Slices|Baracuda - Seela (சீலா) – Large Slices|Trevally - Thegai Paarai (தேங்காய் பாறை) – Large Slices|Spot Grouper - Kalava (கலவா) – Medium Slices',
+  rawAddons:  'Head & Tail +₹199|Head & Tail +₹199, 1 extra piece(s) +₹71||Head & Tail +₹199',
+  rawPrice:   '₹1380+₹199|₹356+₹199+₹71|₹922|₹902+₹199',
+  orderSummary:'',
   confirm:'Pending', processing:'Not Started', dispatch:'Pending',
   delivery:'Pending', payMethod:'Online', payment:'Paid',
 }];
